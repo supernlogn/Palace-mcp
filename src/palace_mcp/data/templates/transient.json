@@ -1,0 +1,48 @@
+{
+  "Problem": {
+    "Type": "Transient",
+    "Output": "results",
+    "Verbose": 2
+  },
+  "Model": {
+    "Mesh": "mesh/model.msh",
+    "L0": 1e-3
+  },
+  "Domains": {
+    "Materials": [
+      {
+        "Attributes": [1],
+        "Permeability": 1.0,
+        "Permittivity": 1.0
+      }
+    ]
+  },
+  "Boundaries": {
+    "PEC": {
+      "Attributes": [1]
+    },
+    "LumpedPort": [
+      {
+        "Index": 1,
+        "Attributes": [2],
+        "R": 50.0,
+        "Excitation": true,
+        "Direction": "+X"
+      }
+    ]
+  },
+  "Solver": {
+    "Order": 2,
+    "Transient": {
+      "Type": "Default",
+      "MaxTime": 1e-9,
+      "TimeStep": 1e-12
+    },
+    "Linear": {
+      "Type": "Default",
+      "KSPType": "GMRES",
+      "Tol": 1e-8,
+      "MaxIts": 500
+    }
+  }
+}

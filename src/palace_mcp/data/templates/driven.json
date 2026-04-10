@@ -1,0 +1,55 @@
+{
+  "Problem": {
+    "Type": "Driven",
+    "Output": "results",
+    "Verbose": 2
+  },
+  "Model": {
+    "Mesh": "mesh/model.msh",
+    "L0": 1e-3
+  },
+  "Domains": {
+    "Materials": [
+      {
+        "Attributes": [1],
+        "Permeability": 1.0,
+        "Permittivity": 1.0
+      }
+    ]
+  },
+  "Boundaries": {
+    "PEC": {
+      "Attributes": [1]
+    },
+    "LumpedPort": [
+      {
+        "Index": 1,
+        "Attributes": [2],
+        "R": 50.0,
+        "Excitation": true,
+        "Direction": "+X"
+      },
+      {
+        "Index": 2,
+        "Attributes": [3],
+        "R": 50.0,
+        "Excitation": false,
+        "Direction": "+X"
+      }
+    ]
+  },
+  "Solver": {
+    "Order": 2,
+    "Driven": {
+      "MinFreq": 1e9,
+      "MaxFreq": 10e9,
+      "FreqStep": 100e6
+    },
+    "Linear": {
+      "Type": "Default",
+      "KSPType": "GMRES",
+      "Tol": 1e-8,
+      "MaxIts": 500
+    }
+  }
+}

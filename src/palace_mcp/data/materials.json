@@ -1,0 +1,112 @@
+{
+  "materials": {
+    "vacuum": {
+      "name": "Vacuum / Air",
+      "Permeability": 1.0,
+      "Permittivity": 1.0,
+      "LossTan": 0.0,
+      "Conductivity": 0.0
+    },
+    "copper": {
+      "name": "Copper",
+      "Permeability": 0.999994,
+      "Permittivity": 1.0,
+      "LossTan": 0.0,
+      "Conductivity": 5.8e7
+    },
+    "aluminum": {
+      "name": "Aluminum",
+      "Permeability": 1.000022,
+      "Permittivity": 1.0,
+      "LossTan": 0.0,
+      "Conductivity": 3.77e7
+    },
+    "gold": {
+      "name": "Gold",
+      "Permeability": 0.99996,
+      "Permittivity": 1.0,
+      "LossTan": 0.0,
+      "Conductivity": 4.1e7
+    },
+    "silver": {
+      "name": "Silver",
+      "Permeability": 0.99998,
+      "Permittivity": 1.0,
+      "LossTan": 0.0,
+      "Conductivity": 6.3e7
+    },
+    "fr4": {
+      "name": "FR-4",
+      "Permeability": 1.0,
+      "Permittivity": 4.4,
+      "LossTan": 0.02,
+      "Conductivity": 0.0
+    },
+    "rogers_rt5880": {
+      "name": "Rogers RT/duroid 5880",
+      "Permeability": 1.0,
+      "Permittivity": 2.2,
+      "LossTan": 0.0009,
+      "Conductivity": 0.0
+    },
+    "rogers_ro4003c": {
+      "name": "Rogers RO4003C",
+      "Permeability": 1.0,
+      "Permittivity": 3.55,
+      "LossTan": 0.0027,
+      "Conductivity": 0.0
+    },
+    "silicon": {
+      "name": "Silicon (high-resistivity)",
+      "Permeability": 1.0,
+      "Permittivity": 11.7,
+      "LossTan": 0.001,
+      "Conductivity": 0.0
+    },
+    "silicon_dioxide": {
+      "name": "Silicon Dioxide (SiO2)",
+      "Permeability": 1.0,
+      "Permittivity": 3.9,
+      "LossTan": 0.0001,
+      "Conductivity": 0.0
+    },
+    "sapphire": {
+      "name": "Sapphire (Al2O3)",
+      "Permeability": 1.0,
+      "Permittivity": 9.4,
+      "LossTan": 1e-5,
+      "Conductivity": 0.0,
+      "MaterialAxes": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]
+    },
+    "ptfe": {
+      "name": "PTFE (Teflon)",
+      "Permeability": 1.0,
+      "Permittivity": 2.1,
+      "LossTan": 0.0002,
+      "Conductivity": 0.0
+    },
+    "niobium": {
+      "name": "Niobium (superconductor)",
+      "Permeability": 1.0,
+      "Permittivity": 1.0,
+      "LossTan": 0.0,
+      "Conductivity": 0.0,
+      "LondonDepth": 39e-9
+    },
+    "ybco": {
+      "name": "YBCO (superconductor)",
+      "Permeability": 1.0,
+      "Permittivity": 1.0,
+      "LossTan": 0.0,
+      "Conductivity": 0.0,
+      "LondonDepth": 150e-9
+    },
+    "gaas": {
+      "name": "Gallium Arsenide (GaAs)",
+      "Permeability": 1.0,
+      "Permittivity": 12.9,
+      "LossTan": 0.0006,
+      "Conductivity": 0.0
+    }
+  }
+}

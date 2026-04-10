@@ -1,0 +1,40 @@
+{
+  "Problem": {
+    "Type": "Eigenmode",
+    "Output": "results",
+    "Verbose": 2
+  },
+  "Model": {
+    "Mesh": "mesh/model.msh",
+    "L0": 1e-3
+  },
+  "Domains": {
+    "Materials": [
+      {
+        "Attributes": [1],
+        "Permeability": 1.0,
+        "Permittivity": 1.0
+      }
+    ]
+  },
+  "Boundaries": {
+    "PEC": {
+      "Attributes": [1]
+    }
+  },
+  "Solver": {
+    "Order": 2,
+    "Eigenmode": {
+      "N": 5,
+      "Tol": 1e-6,
+      "MaxIts": 100,
+      "Type": "SLEPc"
+    },
+    "Linear": {
+      "Type": "Default",
+      "KSPType": "GMRES",
+      "Tol": 1e-8,
+      "MaxIts": 500
+    }
+  }
+}
