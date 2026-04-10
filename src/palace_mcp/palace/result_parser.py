@@ -16,6 +16,9 @@ class SimulationResults:
     problem_type: str = ""
     eigenfrequencies: list[dict[str, Any]] = field(default_factory=list)
     s_parameters: list[dict[str, Any]] = field(default_factory=list)
+    impedances: list[dict[str, Any]] = field(default_factory=list)
+    far_field: list[dict[str, Any]] = field(default_factory=list)
+    directivity: dict[str, Any] = field(default_factory=dict)
     capacitance_matrix: list[list[float]] | None = None
     inductance_matrix: list[list[float]] | None = None
     domain_energies: list[dict[str, Any]] = field(default_factory=list)
@@ -34,6 +37,12 @@ class SimulationResults:
             result["eigenfrequencies"] = self.eigenfrequencies
         if self.s_parameters:
             result["s_parameters"] = self.s_parameters
+        if self.impedances:
+            result["impedances"] = self.impedances
+        if self.far_field:
+            result["far_field"] = self.far_field
+        if self.directivity:
+            result["directivity"] = self.directivity
         if self.capacitance_matrix is not None:
             result["capacitance_matrix"] = self.capacitance_matrix
         if self.inductance_matrix is not None:
@@ -148,6 +157,25 @@ def parse_results(output_dir: Path, problem_type: str = "") -> SimulationResults
             results.port_voltages, results.port_currents
         )
 
+    # Compute port impedances (Z = V / I) for driven problems
+    if problem_type == "Driven" and results.port_voltages and results.port_currents:
+        results.impedances = _compute_impedances(
+            results.port_voltages, results.port_currents
+        )
+
+    # Parse far-field data
+    farfield_csv = output_dir / "farfield.csv"
+    if farfield_csv.is_file():
+        results.far_field = _read_csv(farfield_csv)
+    # Also check subdirectory
+    for ff_candidate in output_dir.rglob("farfield*.csv"):
+        if ff_candidate != farfield_csv:
+            results.far_field.extend(_read_csv(ff_candidate))
+
+    # Compute directivity from far-field or probe data
+    if results.far_field:
+        results.directivity = _compute_directivity(results.far_field)
+
     # Extract capacitance/inductance matrices for static problems
     if problem_type == "Electrostatic" and results.surface_flux:
         results.capacitance_matrix = _extract_matrix(results.surface_flux, "capacitance")
@@ -190,6 +218,188 @@ def _extract_matrix(
         if values:
             matrix.append(values)
     return matrix
+
+
+def _compute_impedances(
+    voltages: list[dict[str, str]], currents: list[dict[str, str]]
+) -> list[dict[str, Any]]:
+    """Compute port impedances Z = V / I from port voltage/current data.
+
+    Handles both real-valued and complex (Re/Im pair) column conventions.
+    Returns one entry per frequency step with Z per port.
+    """
+    import math
+
+    impedances: list[dict[str, Any]] = []
+    for v_row, i_row in zip(voltages, currents):
+        entry: dict[str, Any] = {}
+
+        # Detect frequency column
+        for key, val in v_row.items():
+            k = key.strip()
+            if "freq" in k.lower() or k.lower() == "f":
+                entry["frequency_hz"] = _to_float(val)
+                break
+
+        # Collect voltage and current columns per port
+        v_cols: dict[str, complex] = {}
+        i_cols: dict[str, complex] = {}
+
+        _collect_complex_columns(v_row, v_cols)
+        _collect_complex_columns(i_row, i_cols)
+
+        # Pair V and I columns by port number.
+        # Column keys may be "V1"/"I1" or just "1".
+        # Normalise to a common port label by stripping leading V/I prefix.
+        v_by_port: dict[str, tuple[str, complex]] = {}
+        for raw_key, val in v_cols.items():
+            port = _strip_vi_prefix(raw_key)
+            v_by_port[port] = (raw_key, val)
+
+        i_by_port: dict[str, tuple[str, complex]] = {}
+        for raw_key, val in i_cols.items():
+            port = _strip_vi_prefix(raw_key)
+            i_by_port[port] = (raw_key, val)
+
+        # Compute Z for each port present in both V and I
+        for port in v_by_port:
+            v_key, v_val = v_by_port[port]
+            if port in i_by_port:
+                i_key, i_val = i_by_port[port]
+                if abs(i_val) > 1e-30:
+                    z = v_val / i_val
+                    label = f"Z_{v_key}"
+                    entry[f"{label}_re"] = z.real
+                    entry[f"{label}_im"] = z.imag
+                    entry[f"{label}_mag"] = abs(z)
+                    entry[f"{label}_phase_deg"] = math.degrees(
+                        math.atan2(z.imag, z.real)
+                    )
+
+        impedances.append(entry)
+    return impedances
+
+
+def _strip_vi_prefix(key: str) -> str:
+    """Strip a leading V or I (case-insensitive) from a port key.
+
+    'V1' → '1', 'I2' → '2', '1' → '1'.
+    """
+    if len(key) > 1 and key[0] in ("V", "v", "I", "i") and key[1:].isdigit():
+        return key[1:]
+    return key
+
+
+def _collect_complex_columns(
+    row: dict[str, str], out: dict[str, complex]
+) -> None:
+    """Extract complex port values from a CSV row.
+
+    Recognises column naming patterns:
+      Re_V1 / Im_V1  or  V1_re / V1_im  or  plain V1 (real-only).
+    Populates *out* keyed by the port identifier (e.g. "V1", "I2").
+    """
+    re_vals: dict[str, float] = {}
+    im_vals: dict[str, float] = {}
+    plain: dict[str, float] = {}
+
+    for key, val in row.items():
+        k = key.strip()
+        kl = k.lower()
+        if "freq" in kl or kl == "f":
+            continue
+
+        if kl.startswith("re_"):
+            re_vals[k[3:]] = _to_float(val)
+        elif kl.startswith("im_"):
+            im_vals[k[3:]] = _to_float(val)
+        elif kl.endswith("_re"):
+            re_vals[k[:-3]] = _to_float(val)
+        elif kl.endswith("_im"):
+            im_vals[k[:-3]] = _to_float(val)
+        else:
+            plain[k] = _to_float(val)
+
+    # Merge real/imaginary pairs
+    all_ids = set(re_vals) | set(im_vals) | set(plain)
+    for pid in all_ids:
+        r = re_vals.get(pid, plain.get(pid, 0.0))
+        i = im_vals.get(pid, 0.0)
+        out[pid] = complex(r, i)
+
+
+def _compute_directivity(far_field: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute directivity metrics from far-field CSV data.
+
+    Expects rows with columns for theta, phi, and power/gain values.
+    Returns boresight directivity, max directivity, and beam solid angle.
+    """
+    import math
+
+    if not far_field:
+        return {}
+
+    # Try to identify columns
+    sample = far_field[0]
+    theta_key = _find_key(sample, ("theta",))
+    phi_key = _find_key(sample, ("phi",))
+    gain_key = _find_key(sample, ("gain", "directivity", "power", "e_total", "etotal"))
+
+    if gain_key is None:
+        return {"error": "No gain/directivity column found in far-field data"}
+
+    max_gain = -1e30
+    max_theta = 0.0
+    max_phi = 0.0
+    boresight_gain = None
+    total_power = 0.0
+    num_points = 0
+
+    for row in far_field:
+        gain = _to_float(str(row.get(gain_key, 0)))
+        theta = _to_float(str(row.get(theta_key, 0))) if theta_key else 0.0
+        phi = _to_float(str(row.get(phi_key, 0))) if phi_key else 0.0
+
+        if gain > max_gain:
+            max_gain = gain
+            max_theta = theta
+            max_phi = phi
+
+        # Check boresight (theta ≈ 0)
+        if theta_key and abs(theta) < 1.0:
+            boresight_gain = gain
+
+        total_power += gain
+        num_points += 1
+
+    avg_power = total_power / max(num_points, 1)
+    directivity_ratio = max_gain / avg_power if avg_power > 1e-30 else 0.0
+    directivity_dbi = 10 * math.log10(max(directivity_ratio, 1e-30))
+
+    result: dict[str, Any] = {
+        "max_directivity_dbi": round(directivity_dbi, 2),
+        "max_gain_direction": {"theta": max_theta, "phi": max_phi},
+        "num_far_field_points": num_points,
+    }
+
+    if boresight_gain is not None:
+        boresight_ratio = boresight_gain / avg_power if avg_power > 1e-30 else 0.0
+        boresight_dbi = 10 * math.log10(max(boresight_ratio, 1e-30))
+        result["boresight_directivity_dbi"] = round(boresight_dbi, 2)
+
+    return result
+
+
+def _find_key(
+    sample: dict[str, Any], candidates: tuple[str, ...]
+) -> str | None:
+    """Find the first key in *sample* whose lowercase form contains a candidate."""
+    for key in sample:
+        kl = key.strip().lower()
+        for c in candidates:
+            if c in kl:
+                return key
+    return None
 
 
 def parse_palace_error(stderr: str) -> dict[str, str]:

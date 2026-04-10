@@ -295,3 +295,198 @@ def generate_comparison_plot(
         result["html"] = fig.to_html(include_plotlyjs="cdn")
 
     return result
+
+
+def generate_radiation_pattern_plot(
+    far_field: list[dict[str, Any]],
+    output_path: str | None = None,
+    plot_style: str = "polar",
+) -> dict[str, Any]:
+    """Generate a radiation pattern plot from far-field data.
+
+    Args:
+        far_field: List of dicts with theta/phi/gain (or similar) keys.
+        output_path: Optional path to save interactive HTML.
+        plot_style: 'polar' for 2-D polar cut, '3d' for 3-D surface.
+
+    Returns base64 PNG (polar) or interactive HTML (3d).
+    """
+    import math
+
+    import plotly.graph_objects as go
+
+    if not far_field:
+        return {"error": "No far-field data to plot"}
+
+    sample = far_field[0]
+    theta_key = _find_viz_key(sample, ("theta",))
+    phi_key = _find_viz_key(sample, ("phi",))
+    gain_key = _find_viz_key(sample, ("gain", "directivity", "power", "e_total", "etotal"))
+
+    if gain_key is None:
+        return {"error": "Cannot identify gain column in far-field data"}
+
+    if plot_style == "3d":
+        return _radiation_pattern_3d(far_field, theta_key, phi_key, gain_key, output_path)
+
+    # ---- 2-D polar plot (phi = 0 cut and phi = 90 cut) ----
+    cuts: dict[str, list[tuple[float, float]]] = {"phi=0": [], "phi=90": []}
+
+    for row in far_field:
+        theta = float(row.get(theta_key, 0)) if theta_key else 0.0
+        phi = float(row.get(phi_key, 0)) if phi_key else 0.0
+        gain = float(row.get(gain_key, 0))
+
+        if abs(phi) < 1.0 or abs(phi - 360) < 1.0:
+            cuts["phi=0"].append((theta, gain))
+        if abs(phi - 90) < 1.0:
+            cuts["phi=90"].append((theta, gain))
+
+    # Fall back to all data if no clear cut could be extracted
+    if not cuts["phi=0"] and not cuts["phi=90"]:
+        cuts = {"all": [(float(row.get(theta_key, 0)) if theta_key else i, float(row.get(gain_key, 0)))
+                        for i, row in enumerate(far_field)]}
+
+    fig = go.Figure()
+    for label, points in cuts.items():
+        if not points:
+            continue
+        points.sort()
+        thetas = [p[0] for p in points]
+        gains = [p[1] for p in points]
+        fig.add_trace(go.Scatterpolar(
+            r=gains,
+            theta=thetas,
+            mode="lines",
+            name=label,
+        ))
+
+    fig.update_layout(
+        title="Radiation Pattern",
+        polar=dict(radialaxis=dict(title="Gain")),
+        template="plotly_dark",
+    )
+
+    result: dict[str, Any] = {"plot_type": "radiation_pattern"}
+    if output_path:
+        fig.write_html(output_path)
+        result["file"] = output_path
+    else:
+        result["html"] = fig.to_html(include_plotlyjs="cdn")
+
+    return result
+
+
+def _radiation_pattern_3d(
+    far_field: list[dict[str, Any]],
+    theta_key: str | None,
+    phi_key: str | None,
+    gain_key: str,
+    output_path: str | None,
+) -> dict[str, Any]:
+    """Render a 3-D radiation pattern surface."""
+    import math
+
+    import numpy as np
+    import plotly.graph_objects as go
+
+    thetas = []
+    phis = []
+    gains = []
+
+    for row in far_field:
+        theta = math.radians(float(row.get(theta_key, 0)) if theta_key else 0.0)
+        phi = math.radians(float(row.get(phi_key, 0)) if phi_key else 0.0)
+        gain = max(float(row.get(gain_key, 0)), 1e-10)
+        thetas.append(theta)
+        phis.append(phi)
+        gains.append(gain)
+
+    # Convert spherical → Cartesian with r = gain
+    x = [g * math.sin(t) * math.cos(p) for g, t, p in zip(gains, thetas, phis)]
+    y = [g * math.sin(t) * math.sin(p) for g, t, p in zip(gains, thetas, phis)]
+    z = [g * math.cos(t) for g, t in zip(gains, thetas)]
+
+    fig = go.Figure(data=[go.Scatter3d(
+        x=x, y=y, z=z,
+        mode="markers",
+        marker=dict(size=3, color=gains, colorscale="Jet", colorbar=dict(title="Gain")),
+    )])
+    fig.update_layout(
+        title="3-D Radiation Pattern",
+        scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
+        template="plotly_dark",
+    )
+
+    result: dict[str, Any] = {"plot_type": "radiation_pattern_3d"}
+    if output_path:
+        fig.write_html(output_path)
+        result["file"] = output_path
+    else:
+        result["html"] = fig.to_html(include_plotlyjs="cdn")
+
+    return result
+
+
+def generate_impedance_plot(
+    impedances: list[dict[str, Any]],
+    target_z: float = 50.0,
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    """Plot port impedance vs frequency with a target impedance reference line.
+
+    Args:
+        impedances: List of dicts from result_parser._compute_impedances.
+        target_z: Target impedance in ohms (plotted as reference).
+        output_path: Optional file to save plot.
+    """
+    import plotly.graph_objects as go
+
+    if not impedances:
+        return {"error": "No impedance data to plot"}
+
+    fig = go.Figure()
+
+    freqs = [z.get("frequency_hz", 0) for z in impedances]
+    freq_ghz = [f / 1e9 for f in freqs]
+
+    # Discover port keys (Z_*_mag)
+    z_keys = sorted({k for z in impedances for k in z if k.endswith("_mag")})
+
+    for key in z_keys:
+        values = [z.get(key, 0) for z in impedances]
+        fig.add_trace(go.Scatter(
+            x=freq_ghz, y=values, mode="lines", name=key.replace("_mag", ""),
+        ))
+
+    # Reference line
+    fig.add_hline(y=target_z, line_dash="dash", line_color="red",
+                  annotation_text=f"Target {target_z} Ω")
+
+    fig.update_layout(
+        title="Port Impedance vs Frequency",
+        xaxis_title="Frequency (GHz)",
+        yaxis_title="|Z| (Ω)",
+        template="plotly_dark",
+    )
+
+    result: dict[str, Any] = {"plot_type": "impedance"}
+    if output_path:
+        fig.write_html(output_path)
+        result["file"] = output_path
+    else:
+        result["html"] = fig.to_html(include_plotlyjs="cdn")
+
+    return result
+
+
+def _find_viz_key(
+    sample: dict[str, Any], candidates: tuple[str, ...]
+) -> str | None:
+    """Find the first key in *sample* whose lowercase form contains a candidate."""
+    for key in sample:
+        kl = key.strip().lower()
+        for c in candidates:
+            if c in kl:
+                return key
+    return None

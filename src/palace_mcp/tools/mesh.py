@@ -120,7 +120,7 @@ def validate_mesh_quality(mesh_path: str) -> dict[str, Any]:
         }
 
     # Skewness
-    quality_filter.SetTetQualityMeasureToSkew()
+    quality_filter.SetTetQualityMeasureToEquiangleSkew()
     quality_filter.SetTriangleQualityMeasureToMaxAngle()
     quality_filter.Update()
     quality_data = quality_filter.GetOutput()
@@ -361,3 +361,157 @@ def _convert_vtu_to_vtk(input_path: str, output_path: str) -> dict[str, Any]:
     writer.Write()
 
     return {"success": True, "output": output_path}
+
+
+def measure_feed_gaps(
+    mesh_path: str,
+    feed_group_prefix: str = "feed",
+) -> dict[str, Any]:
+    """Measure the physical gap at each feed point in a mesh.
+
+    For each physical group whose name starts with *feed_group_prefix*
+    (e.g. ``feed_1``, ``feed_2``, …), this function computes the
+    bounding-box extent along the dipole axis and reports it as the gap.
+
+    Supports Gmsh ``.msh`` and VTK ``.vtu``/``.vtk`` formats.
+
+    Returns a dict with per-feed measurements.
+    """
+    ext = Path(mesh_path).suffix.lower()
+    if ext == ".msh":
+        return _measure_feed_gaps_gmsh(mesh_path, feed_group_prefix)
+    if ext in (".vtu", ".vtk"):
+        return _measure_feed_gaps_vtk(mesh_path, feed_group_prefix)
+    return {"error": f"Unsupported mesh format for feed-gap measurement: {ext}"}
+
+
+def _measure_feed_gaps_gmsh(
+    mesh_path: str,
+    prefix: str,
+) -> dict[str, Any]:
+    """Measure feed gaps from a Gmsh mesh by inspecting physical groups."""
+    try:
+        import gmsh
+    except ImportError:
+        return {"error": "gmsh Python package not installed"}
+
+    gmsh.initialize()
+    try:
+        gmsh.open(mesh_path)
+
+        feeds: dict[str, dict[str, Any]] = {}
+
+        for dim in range(4):
+            for tag_pair in gmsh.model.getPhysicalGroups(dim):
+                name = gmsh.model.getPhysicalName(tag_pair[0], tag_pair[1])
+                if not name.lower().startswith(prefix.lower()):
+                    continue
+
+                entities = gmsh.model.getEntitiesForPhysicalGroup(tag_pair[0], tag_pair[1])
+                all_nodes: list[float] = []
+                for ent in entities:
+                    ntags, coords, _ = gmsh.model.mesh.getNodes(tag_pair[0], ent)
+                    all_nodes.extend(coords)
+
+                if not all_nodes:
+                    feeds[name] = {"error": "No nodes found"}
+                    continue
+
+                coords_arr = np.array(all_nodes).reshape(-1, 3)
+                extents = coords_arr.max(axis=0) - coords_arr.min(axis=0)
+
+                # The gap is the smallest non-trivial extent (along the dipole axis)
+                # For cylindrical feed volumes oriented along z, the z-extent is the gap.
+                gap_axis = int(np.argmin(extents)) if extents.min() > 0 else int(np.argmax(extents))
+                gap = float(extents[gap_axis])
+
+                centre = coords_arr.mean(axis=0).tolist()
+
+                feeds[name] = {
+                    "gap": round(gap, 6),
+                    "gap_axis": ["x", "y", "z"][gap_axis],
+                    "bounds": {
+                        "x": [float(coords_arr[:, 0].min()), float(coords_arr[:, 0].max())],
+                        "y": [float(coords_arr[:, 1].min()), float(coords_arr[:, 1].max())],
+                        "z": [float(coords_arr[:, 2].min()), float(coords_arr[:, 2].max())],
+                    },
+                    "centre": [round(c, 4) for c in centre],
+                    "num_nodes": len(coords_arr),
+                }
+
+        return {"feeds": feeds, "num_feeds": len(feeds)}
+    finally:
+        gmsh.finalize()
+
+
+def _measure_feed_gaps_vtk(
+    mesh_path: str,
+    prefix: str,
+) -> dict[str, Any]:
+    """Measure feed gaps from a VTK mesh using cell-data group arrays."""
+    import vtk
+
+    ext = Path(mesh_path).suffix.lower()
+    if ext == ".vtu":
+        reader = vtk.vtkXMLUnstructuredGridReader()
+    else:
+        reader = vtk.vtkUnstructuredGridReader()
+    reader.SetFileName(mesh_path)
+    reader.Update()
+    mesh = reader.GetOutput()
+
+    if mesh is None:
+        return {"error": "Failed to read mesh"}
+
+    # Look for a cell-data array that encodes physical group IDs
+    group_array = None
+    for i in range(mesh.GetCellData().GetNumberOfArrays()):
+        name = mesh.GetCellData().GetArrayName(i)
+        if name and "group" in name.lower() or name and "physical" in name.lower():
+            group_array = mesh.GetCellData().GetArray(i)
+            break
+
+    if group_array is None:
+        # Fall back: use all cells and just report overall bounds
+        bounds = mesh.GetBounds()
+        return {
+            "feeds": {},
+            "num_feeds": 0,
+            "note": "No physical-group cell data found. Use Gmsh .msh for feed-gap measurement.",
+            "mesh_bounds": {
+                "x": [bounds[0], bounds[1]],
+                "y": [bounds[2], bounds[3]],
+                "z": [bounds[4], bounds[5]],
+            },
+        }
+
+    # Group cells by ID
+    group_cells: dict[int, list[int]] = {}
+    for ci in range(mesh.GetNumberOfCells()):
+        gid = int(group_array.GetValue(ci))
+        group_cells.setdefault(gid, []).append(ci)
+
+    feeds: dict[str, dict[str, Any]] = {}
+    for gid, cell_ids in group_cells.items():
+        name = f"{prefix}_{gid}"
+        pts: list[list[float]] = []
+        for ci in cell_ids:
+            cell = mesh.GetCell(ci)
+            for pi in range(cell.GetNumberOfPoints()):
+                pts.append(list(mesh.GetPoint(cell.GetPointId(pi))))
+
+        if not pts:
+            continue
+
+        coords = np.array(pts)
+        extents = coords.max(axis=0) - coords.min(axis=0)
+        gap_axis = int(np.argmin(extents)) if extents.min() > 0 else int(np.argmax(extents))
+
+        feeds[name] = {
+            "gap": round(float(extents[gap_axis]), 6),
+            "gap_axis": ["x", "y", "z"][gap_axis],
+            "centre": [round(float(c), 4) for c in coords.mean(axis=0)],
+            "num_nodes": len(coords),
+        }
+
+    return {"feeds": feeds, "num_feeds": len(feeds)}

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from palace_mcp.server import _set_nested, list_problem_types
+from palace_mcp.server import _set_nested, _evaluate_objective, list_problem_types
+from palace_mcp.palace.result_parser import SimulationResults
 
 
 class TestSetNested:
@@ -47,3 +48,39 @@ class TestListProblemTypes:
         assert "Transient" in names
         assert "Electrostatic" in names
         assert "Magnetostatic" in names
+
+
+class TestEvaluateObjective:
+    def test_directivity_objective(self):
+        r = SimulationResults(
+            directivity={"boresight_directivity_dbi": 7.5, "max_directivity_dbi": 10.0}
+        )
+        assert _evaluate_objective(r, "directivity", 50.0, 10.0) == 7.5
+
+    def test_max_directivity_objective(self):
+        r = SimulationResults(
+            directivity={"boresight_directivity_dbi": 7.5, "max_directivity_dbi": 10.0}
+        )
+        assert _evaluate_objective(r, "max_directivity", 50.0, 10.0) == 10.0
+
+    def test_impedance_match_objective(self):
+        r = SimulationResults(
+            impedances=[{"Z_V1_mag": 50.0}]
+        )
+        score = _evaluate_objective(r, "impedance_match", 50.0, 10.0)
+        assert score == 0.0  # Perfect match → 0% deviation → score = 0
+
+    def test_impedance_match_with_deviation(self):
+        r = SimulationResults(
+            impedances=[{"Z_V1_mag": 60.0}]
+        )
+        score = _evaluate_objective(r, "impedance_match", 50.0, 10.0)
+        assert score < 0  # Deviation → negative score
+
+    def test_missing_directivity_returns_negative(self):
+        r = SimulationResults()
+        assert _evaluate_objective(r, "directivity", 50.0, 10.0) == -999.0
+
+    def test_missing_impedances_returns_negative(self):
+        r = SimulationResults()
+        assert _evaluate_objective(r, "impedance_match", 50.0, 10.0) == -999.0

@@ -8,6 +8,9 @@ import pytest
 
 from palace_mcp.palace.result_parser import (
     SimulationResults,
+    _collect_complex_columns,
+    _compute_directivity,
+    _compute_impedances,
     _to_float,
     parse_palace_error,
     parse_results,
@@ -157,3 +160,127 @@ class TestParsePalaceError:
         long_msg = "x" * 1000
         d = parse_palace_error(long_msg)
         assert len(d["message"]) <= 500
+
+
+class TestComputeImpedances:
+    def test_basic_impedance(self):
+        voltages = [{"freq": "1e9", "Re_V1": "50.0", "Im_V1": "0.0"}]
+        currents = [{"freq": "1e9", "Re_I1": "1.0", "Im_I1": "0.0"}]
+        result = _compute_impedances(voltages, currents)
+        assert len(result) == 1
+        assert result[0]["Z_V1_mag"] == pytest.approx(50.0, rel=1e-6)
+
+    def test_complex_impedance(self):
+        voltages = [{"freq": "1e9", "Re_V1": "50.0", "Im_V1": "25.0"}]
+        currents = [{"freq": "1e9", "Re_I1": "1.0", "Im_I1": "0.0"}]
+        result = _compute_impedances(voltages, currents)
+        assert result[0]["Z_V1_re"] == pytest.approx(50.0, rel=1e-6)
+        assert result[0]["Z_V1_im"] == pytest.approx(25.0, rel=1e-6)
+
+    def test_multi_port(self):
+        voltages = [{"freq": "1e9", "Re_V1": "50", "Im_V1": "0", "Re_V2": "100", "Im_V2": "0"}]
+        currents = [{"freq": "1e9", "Re_I1": "1", "Im_I1": "0", "Re_I2": "2", "Im_I2": "0"}]
+        result = _compute_impedances(voltages, currents)
+        assert result[0]["Z_V1_mag"] == pytest.approx(50.0)
+        assert result[0]["Z_V2_mag"] == pytest.approx(50.0)
+
+    def test_column_suffix_format(self):
+        """Test V1_re / V1_im naming convention."""
+        voltages = [{"freq": "1e9", "V1_re": "50.0", "V1_im": "0.0"}]
+        currents = [{"freq": "1e9", "I1_re": "1.0", "I1_im": "0.0"}]
+        result = _compute_impedances(voltages, currents)
+        assert len(result) == 1
+        assert result[0]["Z_V1_mag"] == pytest.approx(50.0, rel=1e-6)
+
+    def test_frequency_extracted(self):
+        voltages = [{"freq": "2e9", "Re_V1": "75", "Im_V1": "0"}]
+        currents = [{"freq": "2e9", "Re_I1": "1.5", "Im_I1": "0"}]
+        result = _compute_impedances(voltages, currents)
+        assert result[0]["frequency_hz"] == pytest.approx(2e9)
+
+
+class TestCollectComplexColumns:
+    def test_re_im_prefix(self):
+        row = {"freq": "1e9", "Re_V1": "3.0", "Im_V1": "4.0"}
+        out: dict[str, complex] = {}
+        _collect_complex_columns(row, out)
+        assert "V1" in out
+        assert out["V1"] == complex(3.0, 4.0)
+
+    def test_re_im_suffix(self):
+        row = {"V1_re": "3.0", "V1_im": "4.0"}
+        out: dict[str, complex] = {}
+        _collect_complex_columns(row, out)
+        assert "V1" in out
+        assert out["V1"] == complex(3.0, 4.0)
+
+    def test_plain_real_column(self):
+        row = {"V1": "5.0"}
+        out: dict[str, complex] = {}
+        _collect_complex_columns(row, out)
+        assert "V1" in out
+        assert out["V1"] == complex(5.0, 0.0)
+
+
+class TestComputeDirectivity:
+    def test_basic_directivity(self):
+        far_field = [
+            {"theta": "0", "phi": "0", "gain": "10.0"},
+            {"theta": "90", "phi": "0", "gain": "1.0"},
+            {"theta": "180", "phi": "0", "gain": "0.5"},
+            {"theta": "90", "phi": "90", "gain": "1.0"},
+        ]
+        result = _compute_directivity(far_field)
+        assert "max_directivity_dbi" in result
+        assert result["max_gain_direction"]["theta"] == 0.0
+        assert "boresight_directivity_dbi" in result
+
+    def test_empty_returns_empty(self):
+        assert _compute_directivity([]) == {}
+
+    def test_no_gain_column(self):
+        far_field = [{"theta": "0", "phi": "0", "unknown": "1"}]
+        result = _compute_directivity(far_field)
+        assert "error" in result
+
+    def test_directivity_is_positive_for_directive_pattern(self):
+        # Strong boresight, weak elsewhere
+        far_field = [{"theta": "0", "phi": "0", "gain": "100"}]
+        far_field += [{"theta": str(t), "phi": "0", "gain": "1"} for t in range(10, 181, 10)]
+        result = _compute_directivity(far_field)
+        assert result["max_directivity_dbi"] > 0
+
+
+class TestImpedanceAndFarFieldParsing:
+    def test_impedances_in_driven_results(self, tmp_path: Path):
+        v_csv = "freq,Re_V1,Im_V1\n1e9,50.0,0.0\n"
+        i_csv = "freq,Re_I1,Im_I1\n1e9,1.0,0.0\n"
+        (tmp_path / "port-V.csv").write_text(v_csv)
+        (tmp_path / "port-I.csv").write_text(i_csv)
+        results = parse_results(tmp_path, problem_type="Driven")
+        assert len(results.impedances) == 1
+        assert "Z_V1_mag" in results.impedances[0]
+
+    def test_farfield_csv_parsed(self, tmp_path: Path):
+        ff_csv = "theta,phi,gain\n0,0,10\n90,0,1\n"
+        (tmp_path / "farfield.csv").write_text(ff_csv)
+        results = parse_results(tmp_path, problem_type="Driven")
+        assert len(results.far_field) == 2
+
+    def test_directivity_computed_from_farfield(self, tmp_path: Path):
+        ff_csv = "theta,phi,gain\n0,0,10\n90,0,1\n180,0,0.5\n"
+        (tmp_path / "farfield.csv").write_text(ff_csv)
+        results = parse_results(tmp_path, problem_type="Driven")
+        assert results.directivity
+        assert "max_directivity_dbi" in results.directivity
+
+    def test_to_dict_includes_new_fields(self):
+        r = SimulationResults(
+            impedances=[{"Z_V1_mag": 50.0}],
+            far_field=[{"theta": 0, "phi": 0, "gain": 10}],
+            directivity={"max_directivity_dbi": 5.0},
+        )
+        d = r.to_dict()
+        assert "impedances" in d
+        assert "far_field" in d
+        assert "directivity" in d

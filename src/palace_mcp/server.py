@@ -18,6 +18,11 @@ from mcp.server.fastmcp import FastMCP
 from palace_mcp.config import ServerConfig
 from palace_mcp.palace import PalaceRunner, SimulationStatus
 from palace_mcp.palace.config_builder import build_config, load_config, write_config
+from palace_mcp.palace.config_builder import (
+    build_farfield_boundaries,
+    build_phased_array_ports,
+    verify_impedance_match,
+)
 from palace_mcp.palace.result_parser import parse_palace_error, parse_results
 from palace_mcp.palace.validator import validate_config, validate_config_file
 from palace_mcp.tools import docs as docs_tools
@@ -45,6 +50,55 @@ mcp = FastMCP(
         "visualization."
     ),
 )
+
+
+# ============================================================================
+# Resources — Palace & VTK documentation
+# ============================================================================
+
+_PALACE_DOCS_DIR = Path(__file__).parent / "data" / "docs"
+_VTK_DOCS_DIR = Path(__file__).parent / "data" / "vtk_docs"
+
+
+def _register_doc_resources() -> None:
+    """Register every bundled doc file as an MCP resource."""
+    for docs_dir, uri_prefix, label in [
+        (_PALACE_DOCS_DIR, "palace-docs", "Palace"),
+        (_VTK_DOCS_DIR, "vtk-docs", "VTK"),
+    ]:
+        if not docs_dir.is_dir():
+            continue
+        for md_file in sorted(docs_dir.rglob("*.md")):
+            rel = md_file.relative_to(docs_dir).as_posix()
+            uri = f"docs://{uri_prefix}/{rel}"
+            # Extract first heading as title
+            title = rel
+            try:
+                text = md_file.read_text(encoding="utf-8", errors="replace")
+                for line in text.splitlines():
+                    if line.startswith("# "):
+                        title = line[2:].strip()
+                        break
+            except OSError:
+                text = ""
+
+            # Capture text in closure
+            _content = text
+
+            def _make_reader(content: str) -> Any:
+                def _read() -> str:
+                    return content
+                return _read
+
+            mcp.resource(
+                uri,
+                name=f"{label}: {title}",
+                description=f"{label} documentation — {rel}",
+                mime_type="text/markdown",
+            )(_make_reader(_content))
+
+
+_register_doc_resources()
 
 
 # ============================================================================
@@ -479,7 +533,8 @@ def generate_plot(
 ) -> dict[str, Any]:
     """Generate a metric plot from simulation results.
 
-    plot_type: 's_parameters', 'eigenmode', 'field_energy'
+    plot_type: 's_parameters', 'eigenmode', 'field_energy',
+               'radiation_pattern', 'radiation_pattern_3d', 'impedance'
     Returns interactive HTML or saves to the project results directory.
     """
     project_dir = proj_tools._resolve_project(_cfg.projects_dir, project_name)
@@ -495,8 +550,17 @@ def generate_plot(
         return viz_tools.generate_eigenmode_plot(results.eigenfrequencies, output_path)
     elif plot_type == "field_energy":
         return viz_tools.generate_field_energy_plot(results.domain_energies, output_path)
+    elif plot_type == "radiation_pattern":
+        return viz_tools.generate_radiation_pattern_plot(results.far_field, output_path, "polar")
+    elif plot_type == "radiation_pattern_3d":
+        return viz_tools.generate_radiation_pattern_plot(results.far_field, output_path, "3d")
+    elif plot_type == "impedance":
+        return viz_tools.generate_impedance_plot(results.impedances, output_path=output_path)
     else:
-        return {"error": f"Unknown plot type: {plot_type}. Use: s_parameters, eigenmode, field_energy"}
+        return {
+            "error": f"Unknown plot type: {plot_type}. Use: s_parameters, "
+            "eigenmode, field_energy, radiation_pattern, radiation_pattern_3d, impedance"
+        }
 
 
 # ============================================================================
@@ -642,6 +706,267 @@ def estimate_resources(
 
 
 # ============================================================================
+# 10. Antenna / Phased-Array Helpers
+# ============================================================================
+
+
+@mcp.tool()
+def create_phased_array_config(
+    project_name: str,
+    mesh_file: str,
+    num_ports: int,
+    port_attributes: list[int],
+    amplitudes: list[float] | None = None,
+    phases_deg: list[float] | None = None,
+    impedance: float = 50.0,
+    direction: str = "+Z",
+    freq_min: float = 0.8e9,
+    freq_max: float = 1.2e9,
+    freq_step: float = 10e6,
+    absorbing_attributes: list[int] | None = None,
+    config_name: str = "palace.json",
+) -> dict[str, Any]:
+    """Create a full Palace driven-simulation config for a phased antenna array.
+
+    Combines phased-array lumped-port excitation with absorbing boundary
+    conditions and a frequency sweep.
+    """
+    project_dir = proj_tools._resolve_project(_cfg.projects_dir, project_name)
+
+    boundaries = build_phased_array_ports(
+        num_ports=num_ports,
+        port_attributes=port_attributes,
+        amplitudes=amplitudes,
+        phases_deg=phases_deg,
+        impedance=impedance,
+        direction=direction,
+    )
+
+    if absorbing_attributes:
+        ff_bounds = build_farfield_boundaries(absorbing_attributes)
+        boundaries.update(ff_bounds)
+
+    materials = [{"Attributes": [1], "Permeability": 1.0, "Permittivity": 1.0}]
+
+    config = build_config(
+        problem_type="Driven",
+        mesh_file=f"../mesh/{mesh_file}",
+        materials=materials,
+        boundaries=boundaries,
+        solver={
+            "Driven": {
+                "MinFreq": freq_min,
+                "MaxFreq": freq_max,
+                "FreqStep": freq_step,
+            },
+        },
+    )
+
+    config_path = project_dir / "config" / config_name
+    write_config(config, config_path)
+    return {"config_path": str(config_path), "config": config}
+
+
+@mcp.tool()
+def get_impedance_results(
+    project_name: str,
+    target_z: float = 50.0,
+    tolerance_pct: float = 10.0,
+) -> dict[str, Any]:
+    """Compute and verify port impedances from simulation results.
+
+    Parses port voltage and current data, computes Z = V / I per port,
+    and checks each against a target impedance with tolerance.
+    """
+    project_dir = proj_tools._resolve_project(_cfg.projects_dir, project_name)
+    results = parse_results(project_dir / "results", "Driven")
+
+    if not results.impedances:
+        return {"error": "No impedance data available. Run a Driven simulation first."}
+
+    verification = verify_impedance_match(
+        results.impedances, target_z, tolerance_pct
+    )
+    verification["impedances"] = results.impedances
+    return verification
+
+
+@mcp.tool()
+def get_directivity(project_name: str) -> dict[str, Any]:
+    """Compute directivity metrics from simulation far-field results.
+
+    Returns boresight directivity (dBi), maximum directivity, and the
+    direction of peak radiation.
+    """
+    project_dir = proj_tools._resolve_project(_cfg.projects_dir, project_name)
+    results = parse_results(project_dir / "results", "Driven")
+
+    if not results.directivity:
+        return {
+            "error": "No far-field / directivity data available. "
+            "Ensure the simulation includes far-field postprocessing."
+        }
+    return results.directivity
+
+
+@mcp.tool()
+def get_radiation_pattern(project_name: str) -> dict[str, Any]:
+    """Retrieve the parsed far-field radiation pattern data.
+
+    Returns the full list of (theta, phi, gain) records from the
+    simulation far-field output.
+    """
+    project_dir = proj_tools._resolve_project(_cfg.projects_dir, project_name)
+    results = parse_results(project_dir / "results", "Driven")
+
+    if not results.far_field:
+        return {"error": "No far-field data found in results."}
+    return {
+        "num_points": len(results.far_field),
+        "far_field": results.far_field,
+        "directivity": results.directivity,
+    }
+
+
+@mcp.tool()
+def measure_feed_point_gaps(
+    project_name: str,
+    mesh_file: str,
+    feed_group_prefix: str = "feed",
+) -> dict[str, Any]:
+    """Measure the physical gap at each dipole feed point in a mesh.
+
+    Inspects mesh physical groups whose names start with *feed_group_prefix*
+    and reports the bounding-box extent along the dipole axis for each.
+    """
+    project_dir = proj_tools._resolve_project(_cfg.projects_dir, project_name)
+    mesh_path = project_dir / "mesh" / mesh_file
+    return mesh_tools.measure_feed_gaps(str(mesh_path), feed_group_prefix)
+
+
+# ============================================================================
+# 11. Multi-Parameter Optimization
+# ============================================================================
+
+
+@mcp.tool()
+async def run_optimization(
+    project_name: str,
+    config_file: str,
+    parameters: list[dict[str, Any]],
+    objective: str = "directivity",
+    target_impedance: float = 50.0,
+    impedance_tolerance_pct: float = 10.0,
+    num_procs: int = 1,
+) -> dict[str, Any]:
+    """Run a grid-search optimization over multiple parameters.
+
+    Each entry in *parameters* is::
+
+        {"path": "dot.separated.config.path",
+         "values": [v1, v2, ...]}
+
+    The Cartesian product of all parameter values is swept.
+
+    objective:
+        - 'directivity': maximise boresight directivity (dBi)
+        - 'max_directivity': maximise peak directivity
+        - 'impedance_match': minimise impedance deviation from target
+
+    Returns the best configuration and all evaluated points.
+    """
+    import itertools
+
+    project_dir = proj_tools._resolve_project(_cfg.projects_dir, project_name)
+    config_path = project_dir / "config" / config_file
+    base_config = load_config(config_path)
+
+    param_names = [p["path"] for p in parameters]
+    param_values = [p["values"] for p in parameters]
+    grid = list(itertools.product(*param_values))
+
+    evaluated: list[dict[str, Any]] = []
+    best: dict[str, Any] | None = None
+    best_score = -1e30
+
+    for combo in grid:
+        # Build modified config
+        trial_config = json.loads(json.dumps(base_config))
+        combo_dict: dict[str, Any] = {}
+        for name, val in zip(param_names, combo):
+            _set_nested(trial_config, name, val)
+            combo_dict[name] = val
+
+        run_id = str(uuid.uuid4())[:8]
+        trial_name = f"opt_{run_id}.json"
+        trial_path = project_dir / "config" / trial_name
+        write_config(trial_config, trial_path)
+        trial_output = project_dir / "results" / run_id
+
+        proj_tools.add_run_to_manifest(
+            project_dir, run_id, trial_name, parameters=combo_dict,
+        )
+
+        run = await _runner.start_simulation(
+            run_id=run_id,
+            config_path=trial_path,
+            output_dir=trial_output,
+            num_procs=num_procs,
+            timeout=_cfg.simulation_timeout,
+        )
+
+        # Parse results
+        trial_results = parse_results(trial_output, "Driven")
+
+        score = _evaluate_objective(
+            trial_results, objective, target_impedance, impedance_tolerance_pct,
+        )
+
+        entry = {
+            "run_id": run_id,
+            "parameters": combo_dict,
+            "status": run.progress.status.value,
+            "score": score,
+            "directivity": trial_results.directivity,
+        }
+        evaluated.append(entry)
+
+        if score > best_score:
+            best_score = score
+            best = entry
+
+    return {
+        "objective": objective,
+        "num_evaluations": len(evaluated),
+        "best": best,
+        "all_evaluations": evaluated,
+    }
+
+
+def _evaluate_objective(
+    results: Any,
+    objective: str,
+    target_z: float,
+    tol_pct: float,
+) -> float:
+    """Score a simulation result according to the chosen objective."""
+    if objective == "directivity":
+        return results.directivity.get("boresight_directivity_dbi", -999.0)
+    elif objective == "max_directivity":
+        return results.directivity.get("max_directivity_dbi", -999.0)
+    elif objective == "impedance_match":
+        if not results.impedances:
+            return -999.0
+        verification = verify_impedance_match(results.impedances, target_z, tol_pct)
+        # Score = negative total deviation (higher = better)
+        total_dev = sum(
+            p["deviation_pct"] for p in verification["ports"].values()
+        )
+        return -total_dev
+    return 0.0
+
+
+# ============================================================================
 # Entry point
 # ============================================================================
 
@@ -664,6 +989,7 @@ def main() -> None:
 
     mcp.settings.host = _cfg.host
     mcp.settings.port = _cfg.port
+    mcp.settings.streamable_http_path = "/"
     mcp.run(transport="streamable-http")
 
 

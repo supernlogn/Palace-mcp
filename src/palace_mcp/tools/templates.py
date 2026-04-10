@@ -68,6 +68,25 @@ TEMPLATES: dict[str, dict[str, Any]] = {
             "mesh_size": {"default": 0.5, "unit": "mm", "description": "Target mesh element size"},
         },
     },
+    "dipole_antenna": {
+        "name": "Dipole Antenna Array",
+        "description": (
+            "A linear array of thin-wire dipole antennas with parameterized "
+            "spacing. Each dipole has an explicit feed-point gap for lumped "
+            "port excitation. Suitable for driven (frequency-domain) "
+            "simulations in Palace."
+        ),
+        "parameters": {
+            "dipole_length": {"default": 150.0, "unit": "mm", "description": "Total dipole length (tip to tip)"},
+            "wire_radius": {"default": 1.0, "unit": "mm", "description": "Wire cross-section radius"},
+            "feed_gap": {"default": 2.0, "unit": "mm", "description": "Gap at the feed point of each dipole"},
+            "num_dipoles": {"default": 5, "unit": "", "description": "Number of dipoles in the array"},
+            "spacing": {"default": 150.0, "unit": "mm", "description": "Center-to-center spacing between adjacent dipoles"},
+            "air_box_margin": {"default": 200.0, "unit": "mm", "description": "Distance from array to air-box boundary"},
+            "mesh_size": {"default": 5.0, "unit": "mm", "description": "Target mesh element size"},
+            "mesh_size_feed": {"default": 1.0, "unit": "mm", "description": "Refined mesh size near feed gaps"},
+        },
+    },
 }
 
 
@@ -118,6 +137,7 @@ def generate_template_script(
         "patch_antenna": _gen_patch,
         "coplanar_waveguide": _gen_cpw,
         "microstrip_line": _gen_microstrip,
+        "dipole_antenna": _gen_dipole,
     }
 
     gen = generators.get(template_id)
@@ -298,6 +318,110 @@ gmsh.model.addPhysicalGroup(3, [air], 2, "air")
 
 # Mesh
 gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
+gmsh.model.mesh.generate(3)
+
+output_dir = os.environ.get("PALACE_MESH_OUTPUT_DIR", ".")
+gmsh.write(os.path.join(output_dir, "model.msh"))
+gmsh.finalize()
+'''
+
+
+def _gen_dipole(p: dict[str, float]) -> str:
+    num = int(p["num_dipoles"])
+    return f'''"""Dipole Antenna Array geometry generation using Gmsh.
+
+Creates a linear array of {num} parallel thin-wire dipole antennas
+with explicit feed-point gaps for lumped-port excitation.
+"""
+import gmsh
+import os
+
+gmsh.initialize()
+gmsh.model.add("dipole_array")
+
+# Parameters
+dipole_length = {p["dipole_length"]}   # total tip-to-tip (mm)
+wire_radius   = {p["wire_radius"]}
+feed_gap      = {p["feed_gap"]}
+num_dipoles   = {num}
+spacing       = {p["spacing"]}
+air_margin    = {p["air_box_margin"]}
+lc            = {p["mesh_size"]}
+lc_feed       = {p["mesh_size_feed"]}
+
+half_len = dipole_length / 2.0
+half_gap = feed_gap / 2.0
+
+# Total array width along x
+array_width = (num_dipoles - 1) * spacing
+
+# ---- Build dipoles along the x-axis, oriented along z ----
+wire_volumes = []
+feed_volumes = []
+
+for i in range(num_dipoles):
+    cx = i * spacing  # centre x of dipole i
+    cy = 0.0
+
+    # Lower arm: cylinder from z = -half_len to z = -half_gap
+    lower = gmsh.model.occ.addCylinder(
+        cx, cy, -half_len,
+        0, 0, half_len - half_gap,
+        wire_radius,
+    )
+
+    # Upper arm: cylinder from z = +half_gap to z = +half_len
+    upper = gmsh.model.occ.addCylinder(
+        cx, cy, half_gap,
+        0, 0, half_len - half_gap,
+        wire_radius,
+    )
+
+    wire_volumes.extend([lower, upper])
+
+    # Feed-gap volume (thin cylinder across the gap for lumped port)
+    feed = gmsh.model.occ.addCylinder(
+        cx, cy, -half_gap,
+        0, 0, feed_gap,
+        wire_radius,
+    )
+    wire_volumes.append(feed)
+    feed_volumes.append(feed)
+
+gmsh.model.occ.synchronize()
+
+# ---- Air box surrounding the array ----
+x_min = -air_margin
+x_max = array_width + air_margin
+y_min = -air_margin
+y_max = air_margin
+z_min = -half_len - air_margin
+z_max = half_len + air_margin
+
+air = gmsh.model.occ.addBox(
+    x_min, y_min, z_min,
+    x_max - x_min, y_max - y_min, z_max - z_min,
+)
+
+gmsh.model.occ.synchronize()
+
+# ---- Physical groups ----
+gmsh.model.addPhysicalGroup(3, wire_volumes, 1, "conductors")
+gmsh.model.addPhysicalGroup(3, [air], 2, "air")
+# Individual feed-gap volumes: attribute 10+i for port i
+for i, fv in enumerate(feed_volumes):
+    gmsh.model.addPhysicalGroup(3, [fv], 10 + i, f"feed_{{i+1}}")
+
+# ---- Mesh sizing ----
+gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
+
+# Refine around feed gaps
+for fv in feed_volumes:
+    bb = gmsh.model.occ.getBoundingBox(3, fv)
+    mid = [(bb[0]+bb[3])/2, (bb[1]+bb[4])/2, (bb[2]+bb[5])/2]
+    gmsh.model.occ.addPoint(mid[0], mid[1], mid[2], lc_feed)
+
+gmsh.model.occ.synchronize()
 gmsh.model.mesh.generate(3)
 
 output_dir = os.environ.get("PALACE_MESH_OUTPUT_DIR", ".")

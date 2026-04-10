@@ -11,7 +11,10 @@ import pytest
 from palace_mcp.palace.config_builder import (
     _deep_merge,
     build_config,
+    build_farfield_boundaries,
+    build_phased_array_ports,
     load_config,
+    verify_impedance_match,
     write_config,
 )
 
@@ -148,3 +151,115 @@ class TestWriteLoadConfig:
         write_config({"a": 1}, path)
         text = path.read_text()
         assert "\n" in text  # pretty-printed
+
+
+# ---------------------------------------------------------------------------
+# build_phased_array_ports
+# ---------------------------------------------------------------------------
+
+class TestBuildPhasedArrayPorts:
+    def test_basic_ports(self):
+        result = build_phased_array_ports(3, [10, 11, 12])
+        ports = result["LumpedPort"]
+        assert len(ports) == 3
+        assert all(p["Excitation"] is True for p in ports)
+        assert all(p["R"] == 50.0 for p in ports)
+
+    def test_port_indices(self):
+        result = build_phased_array_ports(2, [5, 6])
+        ports = result["LumpedPort"]
+        assert ports[0]["Index"] == 1
+        assert ports[1]["Index"] == 2
+
+    def test_custom_phases(self):
+        result = build_phased_array_ports(
+            3, [10, 11, 12], phases_deg=[0.0, 90.0, 180.0]
+        )
+        ports = result["LumpedPort"]
+        assert "ExcitationPhase" not in ports[0]  # 0 deg is default
+        assert ports[1]["ExcitationPhase"] == 90.0
+        assert ports[2]["ExcitationPhase"] == 180.0
+
+    def test_custom_amplitudes(self):
+        result = build_phased_array_ports(
+            2, [10, 11], amplitudes=[1.0, 2.0]
+        )
+        ports = result["LumpedPort"]
+        assert "ExcitationAmp" not in ports[0]  # 1.0 is default
+        assert ports[1]["ExcitationAmp"] == 2.0
+
+    def test_custom_impedance(self):
+        result = build_phased_array_ports(1, [10], impedance=75.0)
+        assert result["LumpedPort"][0]["R"] == 75.0
+
+    def test_mismatched_attributes_raises(self):
+        with pytest.raises(ValueError, match="port_attributes length"):
+            build_phased_array_ports(3, [10, 11])
+
+    def test_mismatched_phases_raises(self):
+        with pytest.raises(ValueError, match="phases_deg"):
+            build_phased_array_ports(2, [10, 11], phases_deg=[0.0])
+
+    def test_mismatched_amplitudes_raises(self):
+        with pytest.raises(ValueError, match="amplitudes"):
+            build_phased_array_ports(2, [10, 11], amplitudes=[1.0])
+
+
+# ---------------------------------------------------------------------------
+# build_farfield_boundaries
+# ---------------------------------------------------------------------------
+
+class TestBuildFarfieldBoundaries:
+    def test_absorbing_only(self):
+        result = build_farfield_boundaries([1, 2, 3])
+        assert "Absorbing" in result
+        assert result["Absorbing"]["Attributes"] == [1, 2, 3]
+        assert result["Absorbing"]["Order"] == 1
+        assert "FarField" not in result
+
+    def test_with_farfield_attributes(self):
+        result = build_farfield_boundaries([1], farfield_attributes=[4, 5])
+        assert "FarField" in result
+        assert result["FarField"]["Attributes"] == [4, 5]
+
+    def test_custom_order(self):
+        result = build_farfield_boundaries([1], order=2)
+        assert result["Absorbing"]["Order"] == 2
+
+
+# ---------------------------------------------------------------------------
+# verify_impedance_match
+# ---------------------------------------------------------------------------
+
+class TestVerifyImpedanceMatch:
+    def test_matched(self):
+        impedances = [
+            {"Z_V1_mag": 50.0, "Z_V2_mag": 50.0},
+        ]
+        result = verify_impedance_match(impedances, target_z=50.0, tolerance_pct=10.0)
+        assert result["all_matched"] is True
+        assert result["ports"]["Z_V1"]["matched"] is True
+
+    def test_unmatched(self):
+        impedances = [
+            {"Z_V1_mag": 80.0},
+        ]
+        result = verify_impedance_match(impedances, target_z=50.0, tolerance_pct=10.0)
+        assert result["all_matched"] is False
+        assert result["ports"]["Z_V1"]["matched"] is False
+
+    def test_tolerance_boundary(self):
+        impedances = [
+            {"Z_V1_mag": 55.0},  # 10% deviation
+        ]
+        result = verify_impedance_match(impedances, target_z=50.0, tolerance_pct=10.0)
+        assert result["ports"]["Z_V1"]["matched"] is True
+
+    def test_multi_frequency(self):
+        impedances = [
+            {"Z_V1_mag": 49.0},
+            {"Z_V1_mag": 51.0},
+        ]
+        result = verify_impedance_match(impedances, target_z=50.0, tolerance_pct=5.0)
+        assert result["ports"]["Z_V1"]["mean_z"] == 50.0
+        assert result["all_matched"] is True

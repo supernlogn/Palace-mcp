@@ -31,6 +31,7 @@ class TestListTemplates:
         assert "patch_antenna" in ids
         assert "coplanar_waveguide" in ids
         assert "microstrip_line" in ids
+        assert "dipole_antenna" in ids
 
 
 class TestGetTemplate:
@@ -69,3 +70,39 @@ class TestGenerateTemplateScript:
             script = generate_template_script(tid)
             assert isinstance(script, str)
             assert len(script) > 100  # non-trivial script
+
+
+class TestDipoleAntennaTemplate:
+    def test_template_exists(self):
+        t = get_template("dipole_antenna")
+        assert t["id"] == "dipole_antenna"
+        assert "dipole_length" in t["parameters"]
+        assert "wire_radius" in t["parameters"]
+        assert "feed_gap" in t["parameters"]
+        assert "num_dipoles" in t["parameters"]
+        assert "spacing" in t["parameters"]
+
+    def test_generates_script(self):
+        script = generate_template_script("dipole_antenna")
+        assert "dipole_array" in script
+        assert "gmsh" in script
+        assert "feed" in script.lower()
+
+    def test_custom_parameters(self):
+        script = generate_template_script(
+            "dipole_antenna",
+            parameters={"num_dipoles": 3, "spacing": 200.0, "dipole_length": 140.0},
+        )
+        assert "num_dipoles   = 3" in script
+        assert "spacing       = 200.0" in script
+        assert "dipole_length = 140.0" in script
+
+    def test_feed_gap_volumes_created(self):
+        script = generate_template_script("dipole_antenna")
+        assert "feed_volumes" in script
+        # Should create physical groups for feeds
+        assert "feed_" in script
+
+    def test_default_five_dipoles(self):
+        script = generate_template_script("dipole_antenna")
+        assert "num_dipoles   = 5" in script
